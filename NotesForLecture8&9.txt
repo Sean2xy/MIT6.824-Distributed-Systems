@@ -4,7 +4,7 @@ Introduction:
 
 Lecture notes from 1 to 12:
 
-Lecture 8 note:
+Lecture 8&9 note:
 
 线性一致（Linearizability）
 
