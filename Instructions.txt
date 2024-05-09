@@ -3,3 +3,6 @@
 Notes written by other：https://mit-public-courses-cn-translatio.gitbook.io/mit6-824
 official document：https://pdos.csail.mit.edu/6.824/schedule.html
 Video in China：https://www.bilibili.com/video/BV1R7411t71W/?spm_id_from=333.337.search-card.all.click&vd_source=318b40dbb80ee15c2068c873562385b0
+
+Notes written by others in English and complete version：https://timilearning.com/posts/mit-6.824/lecture-13-spanner/
+Notes from official MIT：https://pdos.csail.mit.edu/6.824/notes/l-spanner.txt
