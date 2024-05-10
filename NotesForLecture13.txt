@@ -1,0 +1,47 @@
+Introduction:
+分布式系统的核心是通过网络来协调，共同完成一致任务的一些计算机。
+分布式计算之所以如此重要的原因是，许多重要的基础设施都是在它之上建立的，它们需要多台计算机或者说本质上需要多台物理隔离的计算机。
+
+Lecture notes from 1 to 13:
+
+Lecture 13 note: Google spanner
+
+offical notes: https://pdos.csail.mit.edu/6.824/notes/l-spanner.txt
+version writed by other: https://timilearning.com/posts/mit-6.824/lecture-13-spanner/
+Explain between Serial Consistency and External Consistency: https://timilearning.com/posts/consistency-models/
+
+An external schedule is the unique serial schedule that is defined by the actual time order in which transactions complete.
+Any system which guarantees that the schedule it will use to process a set of transactions is equivalent to its external schedule,
+is said to provide external consistency.
+
+Why this paper (Google Spanner, OSDI 2012)?
+  Unusually ambitious for its time:
+    Wide-area distributed transactions.
+    Consistent wide-area replication.
+    Replicating *data* through Paxos.
+  Neat ideas:
+    Two-phase commit over Paxos.
+    Synchronized time for fast r/o transactions.
+  Used a lot inside Google.
+
+
+More generally:
+  Snapshot Isolation gives you serializable r/o transactions.
+    Timestamps set an order.
+    Snapshot versions (and safe time) implement consistent reads at a timestamp.
+    Xaction sees all writes from lower-TS xactions, none from higher.
+    Any number will do for TS if you don't care about external consistency.
+  Synchronized timestamps yield external consistency.
+    Even among transactions at different data centers.
+    Even though reading from local replicas that might lag.
+
+Why is all this useful?
+  Fast r/o transactions:
+    Read from local replicas!
+    No locks!
+    Thus the 10x latency r/o vs r/w improvement in Table 3 (and Table 6).
+  Although:
+    r/o transaction reads may pause due to safe time, to catch up.
+    r/w transaction commits pause in Commit Wait.
+    Accurate (small interval) time minimizes these delays.
+
