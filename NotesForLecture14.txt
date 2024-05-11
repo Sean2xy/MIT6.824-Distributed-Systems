@@ -1,0 +1,50 @@
+Introduction:
+分布式系统的核心是通过网络来协调，共同完成一致任务的一些计算机。
+分布式计算之所以如此重要的原因是，许多重要的基础设施都是在它之上建立的，它们需要多台计算机或者说本质上需要多台物理隔离的计算机。
+
+Lecture notes from 1 to 14:
+
+Lecture 14 note: Optimistic Concurrency Control
+
+tech blog written by other: https://timilearning.com/posts/mit-6.824/lecture-14-occ/
+
+official note: http://nil.lcs.mit.edu/6.824/2020/notes/l-farm.txt
+
+Optimistic Concurrency Control - FaRM (Fast Remote Memory) is a main memory computing platform that provides
+distributed transactions with strict serializability, high performance, durability and high availability.
+
+The FaRM database is intended for a setup where all the servers are managed in the same data centre.
+It partitions data into regions stored over many servers and uses primary/backup replication to replicate these regions
+ on one primary and f backup replicas. With this configuration, a region with f + 1 replicas can tolerate f failures.
+FaRM uses ZooKeeper as its configuration manager, which manages the primary and backup servers allocation for each region.
+
+Non-volatile RAM #
+A FaRM server stores data in its RAM, which eliminates the I/O bottleneck in reading from and writing data to disk.
+For context, it takes about 200ns to write to RAM, while SSD and hard drive writes take about 100μs and 10ms respectively [1].
+Writing to RAM is roughly 500x faster than writing to SSD, and we gain a lot of performance from this optimization.
+
+But by storing data in RAM, we lose the guarantee that our data will survive a power failure. FaRM provides this guarantee
+by attaching its servers to a distributed UPS, which makes the data durable.
+
+Pessimistic: When a transaction wants to read or write an object, it first attempts to acquire a lock. If the attempt is successful,
+it must hold that lock until it commits or aborts. Otherwise, the transaction must wait until any conflicting transaction releases
+it lock on the object.
+
+Optimistic: Here, we can run a transaction that reads and writes objects without locking until commit time. The commit stage requires
+validating that no other transactions changed the data in a way that conflicted with ours. If there's a conflict, our transaction gets
+aborted. Otherwise, the database commits the writes.
+
+Lock #
+
+The first step in committing a transaction that changes one or more objects is that the coordinator sends a LOCK record to the primary
+of each written object. This LOCK record contains the transaction ID, the IDs of all the regions with objects written by the transaction,
+and addresses, versions, and new values of all objects written by the transaction that the destination is primary for.
+The coordinator uses RDMA to append this record to the log at each primary.
+
+When a primary receives this record, it attempts to lock each object at its specified version. This involves using an atomic compare-and-swap
+operation on the high-order bit of its version number—which represents the "lock" flag. The primary then sends back a message to the
+coordinator reporting whether all the lock attempts were successful. Locking will fail if any of these conditions is met:
+Another transaction has locked the object.
+The current version of the object differs from what the transaction read and sent in its LOCK record.
+A failed lock attempt at any primary will cause the coordinator to abort the transaction by writing an ABORT record to all the
+primaries so they can release any held locks, after which the coordinator returns an error to the application.
