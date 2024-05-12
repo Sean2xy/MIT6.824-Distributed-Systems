@@ -1,0 +1,178 @@
+Introduction:
+分布式系统的核心是通过网络来协调，共同完成一致任务的一些计算机。
+分布式计算之所以如此重要的原因是，许多重要的基础设施都是在它之上建立的，它们需要多台计算机或者说本质上需要多台物理隔离的计算机。
+
+Lecture notes from 1 to 16:
+
+Lecture 16 note: Scaling Memcache at Facebook
+
+https://www.bilibili.com/video/BV1R7411t71W/?p=16&vd_source=318b40dbb80ee15c2068c873562385b0
+http://nil.lcs.mit.edu/6.824/2020/notes/l-memcached.txt
+https://timilearning.com/posts/mit-6.824/lecture-16-memcache-at-facebook/
+
+: Memcached - distributed key-value store
+
+
+As your application grows, the single database server might become overloaded as it can receive requests from an unlimited number
+of frontend servers. You may address this by adding multiple database servers and sharding your data over those servers as shown
+in Figure 3. This comes with its challenges—especially around sharding the data efficiently, managing the membership of the different
+database servers, and running distributed transactions—but it could work as a solution to the problem.
+
+But databases are slow. Reading data from disk can be up to 80x slower than reading data stored in memory. As your application's user
+base skyrockets, one way to reduce this latency in database requests is by adding a cache between your frontend servers
+and the database servers. With this setup, read requests will first go to the cache and only redirect to the database layer
+when there's a cache miss.
+
+Facebook's architecture comprises multiple web, memcache, and database servers. A collection of web and memcache servers
+make up a frontend cluster, and multiple frontend clusters make up a data centre. These data centres are called regions in the paper.
+The frontend clusters in a region share the same storage cluster. Facebook replicates clusters in different regions around the world,
+designating one region as the primary and the others as secondary regions.
+
+Facebook partitions data across hundreds of memcache servers in a cluster using consistent hashing.
+
+Reducing load #
+As I wrote earlier, Facebook uses memcache to reduce the read load on their databases. But when data is missing from the cache,
+the web servers must send requests to these databases. Facebook had to take extra care when designing the system to prevent the databases
+from getting overloaded when there are many cache misses. They use a mechanism called leases to address two key problems: stale sets
+and thundering herds.
+
+Leases and stale sets #
+A stale set occurs when a web server sets an out-of-date value for a key in memcache. This can happen when concurrent updates
+to a key get reordered. For example, let's consider this scenario to illustrate a stale set with two clients, C1 and C2.
+
+  key 'k' not in cache
+  C1 get(k), misses
+  C1 reads v1 from DB as the value of k
+    C2 writes k = v2 in DB
+    C2 delete(k)  (recall that any DB writes will invalidate key in cache)
+  C1 set(k, v1)
+  now mc has stale data, since delete(k) has already happened
+  will stay stale indefinitely until k is next written
+
+Leases prevent this problem. When a client encounters a cache miss for a key, the memcache server will give it a lease to set
+data into the cache after reading it from the DB. This lease is a 64-bit token bound to the key. When the client wants to set
+the data in the cache, it must provide this lease token for memcache to verify. But, when memcache receives a delete request
+for the key, it will invalidate any existing lease tokens for that key.
+
+Therefore, in the above scenario, C1 will get a lease from mc which C2's delete() will invalidate. This will lead to memcache
+ignoring C1's set. Note that this key will be missing from the cache and the next reader has to fetch the latest data from the DB.
+
+Leases and thundering herds #
+A thundering herd happens when many clients try to read the data for an invalidated key. When this happens, the clients will all have
+to send their requests to the database servers, which may get overloaded.
+To prevent the thundering herd problem, memcache servers give leases only once every 10 seconds per key. If another client request
+for a key comes in within 10 seconds of the lease being issued, the request will have to wait. The idea is that the first client
+with a lease would have successfully set the data in the cache during the 10 seconds window, and so the waiting clients will read
+from the cache on retry.
+
+In a region: Replication #
+As Facebook's load increased, they could have scaled their system by adding more memcache and web servers to a frontend cluster
+and further partitioning the keyset. However, this has two major limitations:
+
+Incast congestion will get worse as the number of memcache servers increases, since a client has to talk to more servers.
+Partitioning by itself does not help much if a key is very popular, as a single server will need to handle all the requests
+for that key. In cases like this, replicating the data helps so we can share the load among different servers.
+
+Facebook scaled this system by creating multiple replicas of a cluster within a region which share common storage.
+These clusters are called frontend clusters, with each cluster made up of web and memcache servers. This method addresses
+both limitations described above and provides an extra benefit: having smaller clusters instead of a single large one gives
+them more independent failure domains. They can lose a frontend cluster and still continue operating normally.
+
+Cold Cluster Warmup #
+When a new frontend cluster is being brought online, any requests to it will result in a cache miss, and this could lead to
+overloading the database. Facebook has a mechanism called Cold Cluster Warmup to mitigate this.
+
+Quoting the paper to describe the solution:
+
+Cold Cluster Warmup mitigates this by allowing clients in the “cold cluster” (i.e. the frontend cluster that has an empty cache)
+to retrieve data from the “warm cluster” (i.e. a cluster that has caches with normal hit rates) rather than the persistent storage.
+
+Across Regions: Consistency #
+Facebook deploys regions across geographic locations worldwide. This has a few advantages:
+
+Web servers can be closer to users, which reduces the latency in responding to requests.
+Better fault tolerance since we can withstand natural disasters or power failures in one region.
+New locations can provide cheaper power and other economic benefits.
+Facebook designates one region to hold the primary database which all writes must go to, and the other regions to contain read-only replicas.
+They use MySQL's replication mechanism to keep the replica databases in sync with the primary. The key challenge here is in keeping
+the data in memcache consistent with the primary database, which may be in another region.
+
+With the information stored on Facebook—friend lists, status, posts, likes, photos—it is not critical for users to always see fresh data.
+Users will typically tolerate seeing slightly stale data for these things. Thus, Facebook's setup allows for users in a secondary region
+to see slightly stale data for the sake of better performance. The goal here, though, is to reduce that window of staleness and ensure
+that the data across all regions is eventually consistent.
+
+There are two major considerations here:
+
+When writes come from a primary region.
+When writes come from a secondary region.
+Writes from a primary region #
+This follows the mechanism described earlier. Writes go directly to the storage cluster in the region, which then replicates
+it to the secondary regions. Clients in secondary regions may read stale data for any key modified here if there is a lag in replicating
+the changes to those regions.
+
+Writes from a secondary region #
+Consider the following race that can happen when a client C1 updates the database from a secondary region:
+
+  Key k starts with value v1
+  C1 is in a secondary region
+  C1 updates k=v2 in primary DB
+  C1 delete(k)  (in local region)
+  C1 get(k), miss
+  C1 reads local DB  -- sees v1, not v2!
+  later, v2 arrives from primary DB (replication lag)
+
+This violates the read-after-write consistency guarantee, and Facebook prevents this scenario by using remote markers. With this mechanism,
+ when a web server in a secondary region wants to update data that affects a key k, it must:
+
+Set a remote marker rk in the regional pool. Think of rk as a memcache record that represents extra information for key k.
+Send the write to the primary region and include rk in the request, so that the primary knows to invalidate rk when it replicates the write.
+Delete k in the local cluster.
+
+By doing this, the web server's next request for k will result in a cache miss, after which it will check the regional pool to find rk.
+If rk exists, it means the data in the local region is stale and the server will direct the read to the primary region. Otherwise,
+it will read from the local region.
+
+Here, Facebook trades additional latency when there's a cache miss for a lower probability of reading stale data.
+
+Conclusion:
+
+will partition or replication yield most mc throughput?
+  partition: divide keys over mc servers
+  replicate: divide clients over mc servers
+  partition:
+    + more memory-efficient (one copy of each k/v)
+    + works well if no key is very popular
+    - each web server must talk to many mc servers (overhead)
+  replication:
+    + good if a few keys are very popular
+    + fewer TCP connections
+    - less total data can be cached
+
+     cache is critical:
+        not really about reducing user-visible delay
+        mostly about shielding DB from huge overload!
+
+multiple mc clusters *within* each region
+  cluster == complete set of mc cache servers
+    i.e. a replica, at least of cached data
+
+why multiple clusters per region?
+  why not add more and more mc servers to a single cluster?
+  1. adding mc servers to cluster doesn't help single popular keys
+     replicating (one copy per cluster) does help
+  2. more mcs in cluster -> each client req talks to more servers
+     and more in-cast congestion at requesting web servers
+     client requests fetch 20 to 500 keys! over many mc servers
+     MUST request them in parallel (otherwise total latency too large)
+     so all replies come back at the same time
+     network switches, NIC run out of buffers
+  3. hard to build network for single big cluster
+     uniform client/server access
+     so cross-section b/w must be large -- expensive
+     two clusters -> 1/2 the cross-section b/w
+
+I've often thought of using caches primarily to reduce the latency in a system,
+but this lecture has been an eye-opener in also thinking of caches as being vital for throughput survival.
+
+
